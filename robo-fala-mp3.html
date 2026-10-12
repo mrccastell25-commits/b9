@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Robot B9</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+                 font-family: system-ui, sans-serif; }
+    iframe { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; }
+
+    #glow {
+      position: fixed; left: 0; top: 0; width: 16vmin; height: 16vmin;
+      border-radius: 50%; pointer-events: none; opacity: 0;
+      background: radial-gradient(circle,
+        rgba(255,235,235,.95) 0%, rgba(255,40,40,.95) 18%,
+        rgba(255,0,0,.55) 40%, rgba(255,0,0,0) 70%);
+      mix-blend-mode: screen; will-change: transform, opacity;
+    }
+
+    #hint { position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+            background: #000c; color: #fff; padding: 8px 14px; border-radius: 8px;
+            font-size: 14px; pointer-events: none; text-align: center; }
+    #panel { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+             width: min(760px, 94vw); display: flex; flex-direction: column; gap: 8px; }
+    #falas, #tools { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+    button, label.btn { padding: 9px 14px; border-radius: 8px; border: 0; cursor: pointer;
+                        background: #e11; color: #fff; font-size: 14px; }
+    button.sec, label.btn { background: #333; }
+    #status { color: #bbb; font-size: 12px; text-align: center; min-height: 1em; }
+    input[type=file] { display: none; }
+  </style>
+</head>
+<body>
+  <iframe id="viewer" title="Robot B9" allow="autoplay; fullscreen; xr-spatial-tracking" allowfullscreen></iframe>
+  <div id="glow"></div>
+  <div id="hint">Clique no peito do robô para posicionar a luz</div>
+
+  <div id="panel">
+    <div id="falas"></div>
+    <div id="tools">
+      <label class="btn">＋ Adicionar mp3<input id="file" type="file" accept="audio/*" multiple></label>
+      <button id="stop"  class="sec">Parar</button>
+      <button id="test"  class="sec">Testar luz</button>
+      <button id="recal" class="sec">Recalibrar</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <script src="https://static.sketchfab.com/api/sketchfab-viewer-1.12.1.js"></script>
+  <script>
+    const MODEL_UID   = '50adf03a222e405eae8131260588e150';
+    const LOCK_CAMERA = false;
+
+    /* ================= FALAS =================
+       Cada fala: { label: 'texto do botão', src: 'url ou caminho do mp3' }
+       Hoje vem desta lista; depois troque o conteúdo de carregarFalas() pelo Firebase. */
+    const FALAS = [
+      // { label: 'Alerta',     src: 'audio/alerta.mp3' },
+      // { label: 'Saudação',   src: 'audio/saudacao.mp3' },
+    ];
+
+    async function carregarFalas() {
+      // ---- FUTURO (Firebase Storage) ----
+      // import { getStorage, ref, listAll, getDownloadURL } from 'firebase/storage';
+      // const lista = await listAll(ref(getStorage(), 'falas'));
+      // return Promise.all(lista.items.map(async i => ({
+      //   label: i.name.replace(/\.mp3$/i, ''), src: await getDownloadURL(i)
+      // })));
+      return FALAS;
+    }
+
+    /* ================= ESTADO ================= */
+    const $ = id => document.getElementById(id);
+    const glow = $('glow'), hint = $('hint'), statusEl = $('status');
+    const setStatus = s => statusEl.textContent = s;
+
+    let api = null;
+    let chest = JSON.parse(localStorage.getItem('b9-chest') || 'null');
+    let calibrating = !chest;
+    let pos = { x: innerWidth / 2, y: innerHeight / 2 };
+    let level = 0, tracked = false;
+    hint.style.display = calibrating ? 'block' : 'none';
+
+    /* ================= SKETCHFAB ================= */
+    const client = new Sketchfab('1.12.1', $('viewer'));
+    client.init(MODEL_UID, {
+      success(a) { api = a; api.start(); api.addEventListener('viewerready', onReady); },
+      error()    { hint.style.display = 'block'; hint.textContent = 'Não foi possível carregar o modelo.'; },
+      autostart: 1, ui_infos: 0, ui_watermark: 0, ui_hint: 0, ui_stop: 0
+    });
+
+    function onReady() {
+      if (LOCK_CAMERA) api.setUserInteraction(false);
+
+      api.addEventListener('click', info => {
+        if (!calibrating || !info || !info.position3D) return;
+        chest = info.position3D;
+        localStorage.setItem('b9-chest', JSON.stringify(chest));
+        if (info.position2D) { pos.x = info.position2D[0]; pos.y = info.position2D[1]; } // aparece já no clique
+        calibrating = false;
+        hint.style.display = 'none';
+        setStatus('Luz posicionada. Toque em "Testar luz" ou toque uma fala.');
+      }, { pick: 'fast' });
+
+      trackChest();
+    }
+
+    let pending = false;
+    function trackChest() {
+      if (chest && !pending) {
+        pending = true;
+        api.getWorldToScreenCoordinates(chest, (err, c) => {
+          pending = false;
+          if (!err && c && c.canvasCoord) { pos.x = c.canvasCoord[0]; pos.y = c.canvasCoord[1]; tracked = true; }
+        });
+      }
+      requestAnimationFrame(trackChest);
+    }
+
+    $('recal').onclick = () => {
+      calibrating = true; chest = null; tracked = false;
+      localStorage.removeItem('b9-chest');
+      hint.style.display = 'block';
+    };
+
+    /* ================= ÁUDIO ================= */
+    const audio = new Audio();
+    audio.crossOrigin = 'anonymous';           // necessário para ler o volume de URLs externas
+    let audioCtx = null, analyser = null, data = null;
+    let playing = false, maxRms = 0, playStart = 0, simulate = false, testUntil = 0;
+
+    function ensureAudio() {
+      if (audioCtx) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.5;
+      const src = audioCtx.createMediaElementSource(audio);
+      src.connect(analyser);
+      analyser.connect(audioCtx.destination);
+      data = new Uint8Array(analyser.fftSize);
+    }
+
+    async function tocar(fala) {
+      try {
+        ensureAudio();
+        await audioCtx.resume();
+        audio.pause();
+        audio.src = fala.src;
+        maxRms = 0; simulate = false;
+        await audio.play();
+        setStatus('Tocando: ' + fala.label);
+      } catch (e) {
+        setStatus('Erro ao tocar "' + fala.label + '": ' + e.message);
+      }
+    }
+    audio.onplaying = () => { playing = true; playStart = performance.now(); };
+    audio.onpause = audio.onended = () => { playing = false; };
+    audio.onerror = () => { playing = false; setStatus('Não consegui carregar esse áudio.'); };
+
+    $('stop').onclick = () => { audio.pause(); audio.currentTime = 0; playing = false; };
+    $('test').onclick = () => { testUntil = performance.now() + 3000; };
+
+    /* ================= LISTA DE FALAS ================= */
+    function addBotao(fala) {
+      const b = document.createElement('button');
+      b.textContent = '▶ ' + fala.label;
+      b.onclick = () => tocar(fala);
+      $('falas').appendChild(b);
+    }
+    carregarFalas().then(l => { l.forEach(addBotao); if (!l.length) setStatus('Adicione um mp3 para começar.'); });
+
+    $('file').onchange = e => {
+      [...e.target.files].forEach(f =>
+        addBotao({ label: f.name.replace(/\.[^.]+$/, ''), src: URL.createObjectURL(f) }));
+      e.target.value = '';
+    };
+
+    /* ================= ANIMAÇÃO DA LUZ ================= */
+    let peak = 0.05;
+    function render(t) {
+      let target = 0.12 + 0.06 * Math.sin(t / 600);            // parado: brilho fraco
+
+      if (t < testUntil) {                                      // botão "Testar luz"
+        target = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(t / 70));
+      } else if (playing) {
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (const v of data) { const d = (v - 128) / 128; sum += d * d; }
+        const rms = Math.sqrt(sum / data.length);
+        maxRms = Math.max(maxRms, rms);
+
+        // Se após 1s não chegou nenhum sinal, o navegador bloqueou a leitura (CORS): simula
+        if (!simulate && t - playStart > 1000 && maxRms < 0.001) {
+          simulate = true;
+          setStatus('Sem acesso ao volume do áudio (CORS). Usando efeito simulado.');
+        }
+
+        if (simulate) {
+          target = 0.3 + 0.7 * Math.random();
+        } else {
+          peak = Math.max(peak * 0.998, rms, 0.05);             // normaliza pelo pico recente
+          target = 0.15 + 0.85 * Math.min(1, Math.pow(rms / peak, 0.8));
+        }
+      }
+
+      level += (target - level) * (target > level ? 0.6 : 0.2); // sobe rápido, desce suave
+
+      const visible = (chest && !calibrating);
+      glow.style.opacity = visible ? Math.min(1, level) : 0;
+      glow.style.transform =
+        `translate(${pos.x}px, ${pos.y}px) translate(-50%, -50%) scale(${0.75 + 0.6 * level})`;
+      requestAnimationFrame(render);
+    }
+    requestAnimationFrame(render);
+  </script>
+</body>
+</html>
